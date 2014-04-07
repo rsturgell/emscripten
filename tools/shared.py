@@ -1111,7 +1111,7 @@ class Building:
     return generated_libs
 
   @staticmethod
-  def link(files, target, force_archive_contents=False):
+  def link(files, target, force_archive_contents=False, rescan_libs=False):
     actual_files = []
     # Tracking unresolveds is necessary for .a linking, see below.
     # Specify all possible entry points to seed the linking process.
@@ -1120,6 +1120,9 @@ class Building:
     resolved_symbols = set()
     temp_dirs = []
     files = map(os.path.abspath, files)
+    # The list of (filename, contents) for each scanned archive.
+    all_contents = []
+    # The set of included object files.
     added_contents = set()
     has_ar = False
     for f in files:
@@ -1153,12 +1156,13 @@ class Building:
     # Traverse a single archive. The object files are repeatedly scanned for
     # newly satisifed symbols until no new symbols are found. Returns true if
     # any object files were added to the link.
-    def handle_archive(contents):
-      added = True
+    def handle_archive(f, contents):
+      added = False
+      loop_again = True
       #print >> sys.stderr, '  initial undef are now ', unresolved_symbols, '\n'
-      while added: # repeatedly traverse until we have everything we need
+      while loop_again: # repeatedly traverse until we have everything we need
         #print >> sys.stderr, '  running loop of archive including for', f
-        added = False
+        loop_again = False
         for content in contents:
           if content in added_contents: continue
           # Link in the .o if it provides symbols, *or* this is a singleton archive (which is apparently an exception in gcc ld)
@@ -1167,7 +1171,9 @@ class Building:
           if add_object(content, force=force_add):
             added_contents.add(content)
             added = True
+            loop_again = True
       #print >> sys.stderr, '  done running loop of archive including for', f
+      return added
 
     for f in files:
       if not Building.is_ar(f):
@@ -1200,10 +1206,21 @@ class Building:
             contents = map(lambda content: os.path.join(temp_dir, content), contents)
             contents = filter(os.path.exists, map(os.path.abspath, contents))
             contents = filter(Building.is_bitcode, contents)
-            handle_archive(contents)
+            handle_archive(f, contents)
+            # Store the contents for possibly rescanning later.
+            all_contents.append((f, contents))
             #print >> sys.stderr, '  done running loop of archive including for', f
         finally:
           os.chdir(cwd)
+
+    if rescan_libs:
+      needs_rescan = True
+      while needs_rescan: # continue rescanning all the .a files until no more object files are added.
+        needs_rescan = False
+        for f, contents in all_contents:
+          if handle_archive(f, contents):
+            needs_rescan = True
+
     try_delete(target)
 
     # Finish link
